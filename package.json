@@ -1,0 +1,14 @@
+﻿{
+  "name": "tabby-sticky-command-header",
+  "version": "0.0.0",
+  "description": "Experimental Tabby terminal plugin for a VS Code-style sticky command header.",
+  "private": true,
+  "keywords": [
+    "tabby-plugin",
+    "tabby",
+    "terminal",
+    "ssh",
+    "sticky-scroll"
+  ],
+  "license": "MIT"
+}
