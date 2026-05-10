@@ -1,6 +1,6 @@
 import { Injectable } from '@angular/core'
 
-import { TerminalDecorator } from 'tabby-terminal'
+import { SessionMiddleware, TerminalDecorator } from 'tabby-terminal'
 
 type ControlSequenceState =
   | 'normal'
@@ -10,6 +10,17 @@ type ControlSequenceState =
   | 'oscEscape'
   | 'string'
   | 'stringEscape'
+
+class StickyCommandHeaderInputCapture extends SessionMiddleware {
+  constructor (private readonly onInput: (data: Buffer) => void) {
+    super()
+  }
+
+  feedFromTerminal (data: Buffer): void {
+    this.onInput(data)
+    super.feedFromTerminal(data)
+  }
+}
 
 @Injectable()
 export class StickyCommandHeaderDecorator extends TerminalDecorator {
@@ -51,6 +62,9 @@ export class StickyCommandHeaderDecorator extends TerminalDecorator {
     let alternateScreenActive = false
     let viewport: HTMLElement | null = null
     let controlSequenceState: ControlSequenceState = 'normal'
+    let inputCapture: StickyCommandHeaderInputCapture | null = null
+    let inputCaptureMiddlewareStack: any = null
+    let inputSubscription: any = null
 
     const isAtBottom = (): boolean => {
       if (!viewport) {
@@ -189,7 +203,7 @@ export class StickyCommandHeaderDecorator extends TerminalDecorator {
       return filtered
     }
 
-    const inputSubscription = terminal.input$.subscribe((buffer: Buffer) => {
+    const processTerminalInput = (buffer: Buffer): void => {
       const text = filterTerminalInput(buffer.toString('utf8'))
 
       for (const char of text) {
@@ -215,9 +229,53 @@ export class StickyCommandHeaderDecorator extends TerminalDecorator {
           pendingInput += char
         }
       }
-    })
+    }
 
-    this.subscribeUntilDetached(terminal, inputSubscription)
+    const detachInputCapture = (): void => {
+      if (
+        inputCapture &&
+        inputCaptureMiddlewareStack &&
+        typeof inputCaptureMiddlewareStack.remove === 'function'
+      ) {
+        inputCaptureMiddlewareStack.remove(inputCapture)
+      }
+
+      inputCapture = null
+      inputCaptureMiddlewareStack = null
+
+      if (inputSubscription) {
+        inputSubscription.unsubscribe()
+        inputSubscription = null
+      }
+    }
+
+    const attachInputCapture = (): void => {
+      detachInputCapture()
+
+      const middlewareStack = terminal.session?.middleware
+
+      if (middlewareStack && typeof middlewareStack.push === 'function') {
+        inputCapture = new StickyCommandHeaderInputCapture(processTerminalInput)
+        inputCaptureMiddlewareStack = middlewareStack
+        middlewareStack.push(inputCapture)
+        return
+      }
+
+      inputSubscription = terminal.input$.subscribe(processTerminalInput)
+      this.subscribeUntilDetached(terminal, inputSubscription)
+    }
+
+    attachInputCapture()
+
+    if (terminal.sessionChanged$) {
+      const sessionChangedSubscription = terminal.sessionChanged$.subscribe(() => {
+        pendingInput = ''
+        controlSequenceState = 'normal'
+        attachInputCapture()
+      })
+
+      this.subscribeUntilDetached(terminal, sessionChangedSubscription)
+    }
 
     const alternateScreenSubscription = terminal.alternateScreenActive$.subscribe(active => {
       alternateScreenActive = active
@@ -241,6 +299,8 @@ export class StickyCommandHeaderDecorator extends TerminalDecorator {
     window.setTimeout(findViewport, 500)
 
     this.cleanup.set(terminal, () => {
+      detachInputCapture()
+
       if (viewport) {
         viewport.removeEventListener('scroll', updateHeader)
       }
