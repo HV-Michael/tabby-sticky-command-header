@@ -1,5 +1,15 @@
 import { Injectable } from '@angular/core'
+
 import { TerminalDecorator } from 'tabby-terminal'
+
+type ControlSequenceState =
+  | 'normal'
+  | 'escape'
+  | 'csi'
+  | 'osc'
+  | 'oscEscape'
+  | 'string'
+  | 'stringEscape'
 
 @Injectable()
 export class StickyCommandHeaderDecorator extends TerminalDecorator {
@@ -15,6 +25,7 @@ export class StickyCommandHeaderDecorator extends TerminalDecorator {
     host.style.position = host.style.position || 'relative'
 
     const header = document.createElement('div')
+
     header.className = 'tabby-sticky-command-header'
     header.style.display = 'none'
     header.style.position = 'absolute'
@@ -39,6 +50,7 @@ export class StickyCommandHeaderDecorator extends TerminalDecorator {
     let lastCommand = ''
     let alternateScreenActive = false
     let viewport: HTMLElement | null = null
+    let controlSequenceState: ControlSequenceState = 'normal'
 
     const isAtBottom = (): boolean => {
       if (!viewport) {
@@ -68,8 +80,117 @@ export class StickyCommandHeaderDecorator extends TerminalDecorator {
       updateHeader()
     }
 
+    const filterTerminalInput = (text: string): string => {
+      let filtered = ''
+
+      for (const char of text) {
+        const code = char.charCodeAt(0)
+
+        if (controlSequenceState === 'normal') {
+          if (char === '\u001b') {
+            controlSequenceState = 'escape'
+            continue
+          }
+
+          if (char === '\u009b') {
+            controlSequenceState = 'csi'
+            continue
+          }
+
+          if (char === '\u009d') {
+            controlSequenceState = 'osc'
+            continue
+          }
+
+          if (char === '\u0090' || char === '\u009e' || char === '\u009f') {
+            controlSequenceState = 'string'
+            continue
+          }
+
+          if (
+            (code < 32 || code === 127) &&
+            char !== '\r' &&
+            char !== '\n' &&
+            char !== '\u0008' &&
+            char !== '\u007f'
+          ) {
+            continue
+          }
+
+          filtered += char
+          continue
+        }
+
+        if (controlSequenceState === 'escape') {
+          if (char === '[') {
+            controlSequenceState = 'csi'
+            continue
+          }
+
+          if (char === ']') {
+            controlSequenceState = 'osc'
+            continue
+          }
+
+          if (char === 'P' || char === '^' || char === '_' || char === 'X') {
+            controlSequenceState = 'string'
+            continue
+          }
+
+          controlSequenceState = 'normal'
+
+          if (char === '\r' || char === '\n' || char === '\u0008' || char === '\u007f' || char >= ' ') {
+            filtered += char
+          }
+
+          continue
+        }
+
+        if (controlSequenceState === 'csi') {
+          if (code >= 0x40 && code <= 0x7e) {
+            controlSequenceState = 'normal'
+          }
+
+          continue
+        }
+
+        if (controlSequenceState === 'osc') {
+          if (char === '\u0007') {
+            controlSequenceState = 'normal'
+            continue
+          }
+
+          if (char === '\u001b') {
+            controlSequenceState = 'oscEscape'
+            continue
+          }
+
+          continue
+        }
+
+        if (controlSequenceState === 'oscEscape') {
+          controlSequenceState = 'normal'
+          continue
+        }
+
+        if (controlSequenceState === 'string') {
+          if (char === '\u001b') {
+            controlSequenceState = 'stringEscape'
+          }
+
+          continue
+        }
+
+        if (controlSequenceState === 'stringEscape') {
+          controlSequenceState = 'normal'
+        }
+      }
+
+      return filtered
+    }
+
     const inputSubscription = terminal.input$.subscribe((buffer: Buffer) => {
-      const text = buffer.toString('utf8')
+      const text = filterTerminalInput(buffer.toString('utf8'))
 
       for (const char of text) {
         if (char === '\r' || char === '\n') {
@@ -81,6 +202,7 @@ export class StickyCommandHeaderDecorator extends TerminalDecorator {
 
           pendingInput = ''
           updateHeader()
+
           continue
         }
 
@@ -89,7 +211,7 @@ export class StickyCommandHeaderDecorator extends TerminalDecorator {
           continue
         }
 
-        if (char >= ' ' && char !== '\u001b') {
+        if (char >= ' ') {
           pendingInput += char
         }
       }
@@ -109,6 +231,7 @@ export class StickyCommandHeaderDecorator extends TerminalDecorator {
 
       if (terminal.frontend) {
         const contentSubscription = terminal.frontend.contentUpdated$.subscribe(updateHeader)
+
         this.subscribeUntilDetached(terminal, contentSubscription)
       }
     })
@@ -129,6 +252,7 @@ export class StickyCommandHeaderDecorator extends TerminalDecorator {
   detach (terminal: any): void {
     this.cleanup.get(terminal)?.()
     this.cleanup.delete(terminal)
+
     super.detach(terminal)
   }
 }
