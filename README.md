@@ -1,8 +1,28 @@
 # Tabby Sticky Command Header
 
+![Status](https://img.shields.io/badge/status-experimental%20alpha-orange?style=flat-square)
+![Tabby](https://img.shields.io/badge/Tabby-plugin-6f42c1?style=flat-square)
+![TypeScript](https://img.shields.io/badge/TypeScript-4.9-3178C6?style=flat-square&logo=typescript&logoColor=white)
+![Webpack](https://img.shields.io/badge/Webpack-5-8DD6F9?style=flat-square&logo=webpack&logoColor=black)
+![Windows](https://img.shields.io/badge/Windows-tested-0078D4?style=flat-square&logo=windows11&logoColor=white)
+![SSH](https://img.shields.io/badge/SSH-tested-4b5563?style=flat-square)
+![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)
+![npm](https://img.shields.io/badge/npm-not%20published-lightgrey?style=flat-square&logo=npm)
+
 Experimental Tabby terminal plugin for a VS Code-style sticky command header.
 
-The goal is to keep the command that produced the current output visible while scrolling through long terminal output, especially during SSH work, deployments, logs, migrations, package installs, and AI coding assistant output.
+Keep the command that produced the current output visible while scrolling through long terminal output, especially during SSH work, deployments, logs, migrations, package installs, and AI coding assistant output.
+
+## What it does
+
+| Area | Current state |
+| --- | --- |
+| Purpose | Shows the latest command in a sticky header above the terminal viewport. |
+| Status | Experimental alpha. |
+| Tested shells | CMD, PowerShell, SSH. |
+| Tested input | Typed commands and pasted commands. |
+| Install path | Manual local Tabby plugin install. |
+| Publishing | Not published to npm. |
 
 ## Status
 
