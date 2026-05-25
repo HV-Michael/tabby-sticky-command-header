@@ -113,8 +113,12 @@ const formatOutputForCopy = (output: string): string => {
   const lines = normaliseCarriageReturnsForCopy(output).split('\n')
 
   return lines
-    .map(stripBrailleSpinnerRuns)
-    .filter((line, index) => !isBrailleSpinnerOnlyLine(line) && !isAsciiSpinnerNoise(lines, index))
+    .map(line => ({
+      originalLine: line,
+      cleanedLine: stripBrailleSpinnerRuns(line),
+    }))
+    .filter((line, index) => !isBrailleSpinnerOnlyLine(line.originalLine) && !isAsciiSpinnerNoise(lines, index))
+    .map(line => line.cleanedLine)
     .join('\n')
 }
 
