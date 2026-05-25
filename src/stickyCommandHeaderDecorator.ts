@@ -26,7 +26,10 @@ interface CommandBlock {
 const MAX_COMMAND_BLOCKS = 20
 const MAX_OUTPUT_CHARS_PER_BLOCK = 256 * 1024
 const COPY_STATUS_TIMEOUT_MS = 1800
-const BRAILLE_SPINNER_FRAMES = new Set(['⣾', '⣽', '⣻', '⢿', '⡿', '⣟', '⣯', '⣷'])
+const BRAILLE_SPINNER_FRAMES = new Set([
+  '⣾', '⣽', '⣻', '⢿', '⡿', '⣟', '⣯', '⣷',
+  '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏', '⠋',
+])
 const ASCII_SPINNER_FRAMES = new Set(['|', '/', '-', '\\'])
 
 const normaliseCarriageReturnsForCopy = (output: string): string => {
@@ -63,7 +66,25 @@ const normaliseCarriageReturnsForCopy = (output: string): string => {
 }
 
 const isBrailleSpinnerOnlyLine = (line: string): boolean => {
-  return BRAILLE_SPINNER_FRAMES.has(line.trim())
+  const trimmedLine = line.trim()
+
+  return Boolean(trimmedLine) && Array.from(trimmedLine).every(char => BRAILLE_SPINNER_FRAMES.has(char))
+}
+
+const stripBrailleSpinnerRuns = (line: string): string => {
+  const chars = Array.from(line)
+  let start = 0
+  let end = chars.length
+
+  while (start < end && BRAILLE_SPINNER_FRAMES.has(chars[start])) {
+    start++
+  }
+
+  while (end > start && BRAILLE_SPINNER_FRAMES.has(chars[end - 1])) {
+    end--
+  }
+
+  return chars.slice(start, end).join('')
 }
 
 const isAsciiSpinnerOnlyLine = (line: string): boolean => {
@@ -92,6 +113,7 @@ const formatOutputForCopy = (output: string): string => {
   const lines = normaliseCarriageReturnsForCopy(output).split('\n')
 
   return lines
+    .map(stripBrailleSpinnerRuns)
     .filter((line, index) => !isBrailleSpinnerOnlyLine(line) && !isAsciiSpinnerNoise(lines, index))
     .join('\n')
 }
