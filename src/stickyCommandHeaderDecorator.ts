@@ -26,6 +26,131 @@ interface CommandBlock {
 const MAX_COMMAND_BLOCKS = 20
 const MAX_OUTPUT_CHARS_PER_BLOCK = 256 * 1024
 const COPY_STATUS_TIMEOUT_MS = 1800
+const BRAILLE_SPINNER_FRAMES = new Set([
+  '⣾', '⣽', '⣻', '⢿', '⡿', '⣟', '⣯', '⣷',
+  '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏', '⠋',
+])
+const ASCII_SPINNER_FRAMES = new Set(['|', '/', '-', '\\'])
+
+const normaliseCarriageReturnsForCopy = (output: string): string => {
+  const lines: string[] = []
+  let currentLine: string[] = []
+  let cursor = 0
+  const chars = Array.from(output)
+
+  for (let index = 0; index < chars.length; index++) {
+    const char = chars[index]
+
+    if (char === '\r') {
+      if (chars[index + 1] === '\n') {
+        lines.push(currentLine.join(''))
+        currentLine = []
+        cursor = 0
+        index++
+        continue
+      }
+
+      cursor = 0
+      continue
+    }
+
+    if (char === '\n') {
+      lines.push(currentLine.join(''))
+      currentLine = []
+      cursor = 0
+      continue
+    }
+
+    currentLine[cursor] = char
+    cursor++
+  }
+
+  lines.push(currentLine.join(''))
+
+  return lines.join('\n')
+}
+
+const isBrailleSpinnerOnlyLine = (line: string): boolean => {
+  const trimmedLine = line.trim()
+
+  return Boolean(trimmedLine) && Array.from(trimmedLine).every(char => BRAILLE_SPINNER_FRAMES.has(char))
+}
+
+const stripBrailleSpinnerRuns = (line: string): string => {
+  const chars = Array.from(line)
+  let start = 0
+  let end = chars.length
+
+  while (start < end && BRAILLE_SPINNER_FRAMES.has(chars[start])) {
+    start++
+  }
+
+  while (end > start && BRAILLE_SPINNER_FRAMES.has(chars[end - 1])) {
+    end--
+  }
+
+  return chars.slice(start, end).join('')
+}
+
+const getAsciiSpinnerOnlyFrame = (line: string): string | null => {
+  const trimmedLine = line.trim()
+
+  return ASCII_SPINNER_FRAMES.has(trimmedLine) ? trimmedLine : null
+}
+
+const findAsciiSpinnerNoiseLines = (lines: string[]): Set<number> => {
+  const noiseLines = new Set<number>()
+  let runStart: number | null = null
+  let runFrames = new Set<string>()
+
+  const markRun = (runEnd: number): void => {
+    if (runStart === null) {
+      return
+    }
+
+    if (runEnd - runStart >= 3 || runFrames.size >= 2) {
+      for (let index = runStart; index < runEnd; index++) {
+        noiseLines.add(index)
+      }
+    }
+
+    runStart = null
+    runFrames = new Set<string>()
+  }
+
+  for (let index = 0; index < lines.length; index++) {
+    const frame = getAsciiSpinnerOnlyFrame(lines[index])
+
+    if (!frame) {
+      markRun(index)
+      continue
+    }
+
+    if (runStart === null) {
+      runStart = index
+    }
+
+    runFrames.add(frame)
+  }
+
+  markRun(lines.length)
+
+  return noiseLines
+}
+
+const formatOutputForCopy = (output: string): string => {
+  const lines = normaliseCarriageReturnsForCopy(output).split('\n')
+  const asciiSpinnerNoiseLines = findAsciiSpinnerNoiseLines(lines)
+
+  return lines
+    .map(line => ({
+      originalLine: line,
+      cleanedLine: stripBrailleSpinnerRuns(line),
+    }))
+    .filter((line, index) => !isBrailleSpinnerOnlyLine(line.originalLine) && !asciiSpinnerNoiseLines.has(index))
+    .map(line => line.cleanedLine)
+    .join('\n')
+}
 
 class StickyCommandHeaderCapture extends SessionMiddleware {
   constructor (
@@ -356,7 +481,7 @@ export class StickyCommandHeaderDecorator extends TerminalDecorator {
         return
       }
 
-      text = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+      text = text.replace(/\r\n/g, '\n')
       currentBlock.output += text
 
       if (currentBlock.output.length > MAX_OUTPUT_CHARS_PER_BLOCK) {
@@ -403,7 +528,7 @@ export class StickyCommandHeaderDecorator extends TerminalDecorator {
       const copiedText = [
         `$ ${block.command}`,
         block.truncated ? '[Output truncated to the most recent retained text]' : '',
-        block.output.trimEnd(),
+        formatOutputForCopy(block.output).trimEnd(),
       ].filter(Boolean).join('\n')
 
       try {
