@@ -9,18 +9,19 @@
 ![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)
 ![npm](https://img.shields.io/badge/npm-not%20published-lightgrey?style=flat-square&logo=npm)
 
-Experimental Tabby terminal plugin for a VS Code-style sticky command header.
+Experimental Tabby terminal plugin for a VS Code-style sticky command header with a v0 copy-output action.
 
-Keep the command that produced the current output visible while scrolling through long terminal output, especially during SSH work, deployments, logs, migrations, package installs, and AI coding assistant output.
+Keep the command that produced the current output visible while scrolling through long terminal output, then copy the retained output for that command from the sticky header. This is especially useful during SSH work, deployments, logs, migrations, package installs, and AI coding assistant output.
 
 ## What it does
 
 | Area | Current state |
 | --- | --- |
-| Purpose | Shows the latest command in a sticky header above the terminal viewport. |
-| Status | Experimental alpha. |
+| Purpose | Shows the latest command in a sticky header above the terminal viewport and can copy retained output for that command. |
+| Status | Experimental alpha, now in active local use. |
 | Tested shells | CMD, PowerShell, SSH. |
 | Tested input | Typed commands and pasted commands. |
+| Copy output | v0 available from the sticky header when output has been captured. |
 | Install path | Manual local Tabby plugin install. |
 | Publishing | Not published to npm. |
 
@@ -28,7 +29,9 @@ Keep the command that produced the current output visible while scrolling throug
 
 Experimental alpha.
 
-The basic proof now works for local CMD, local PowerShell, and SSH sessions in the tested Windows Tabby setup. It is usable for manual testing, but it is not yet published, versioned as a stable release, or guaranteed across every shell, terminal frontend, reconnect path, or multiplexer setup.
+The plugin now works well enough for active local use in the tested Windows Tabby setup. It is still not published, versioned as a stable release, or guaranteed across every shell, terminal frontend, reconnect path, or multiplexer setup.
+
+The sticky command header proof works for local CMD, local PowerShell, and SSH sessions. The v0 copy-output action has been added so long command output can be copied without manually selecting the whole terminal region.
 
 ## Tested target
 
@@ -58,10 +61,12 @@ The current implementation has been manually verified for:
 - no duplicate sticky headers observed
 - no visible raw terminal control codes in captured command text
 - no previous debug logging strings left in the installed build
+- CMD copy-output action copied a 200-line output block from the sticky header
+- copied CMD output included the command context and expected output from line 1 through line 200
 
 ## Goal
 
-Show a sticky command header at the top of the terminal viewport so users can see which command produced the output they are reading.
+Show a sticky command header at the top of the terminal viewport so users can see which command produced the output they are reading, and copy the retained output for the current command when needed.
 
 ## How it works
 
@@ -69,13 +74,17 @@ The plugin adds a terminal decorator that overlays a small sticky header above t
 
 Command input is captured through the Tabby terminal session middleware path when available. This is needed because pasted command text is not always visible through the older terminal input observable path.
 
-The plugin falls back to the older input observable path only when the middleware stack is unavailable.
+Output capture for the v0 copy-output action also uses the Tabby session middleware path. The plugin keeps a small in-memory set of recent command blocks per terminal tab and caps retained output so a runaway command does not grow memory without bound.
+
+The sticky header shows a `Copy output` action when the latest command block has retained output. Copied text starts with the command line, followed by the retained output block.
+
+The plugin falls back to the older input observable path only when the middleware stack is unavailable. That fallback supports command capture only, not copy-output capture.
 
 ## Manual Windows install or update
 
 Build the plugin:
 
-    cd /d C:\HV-Repos\tabby-sticky-command-header
+    cd /d C:\Projects\tabby-sticky-command-header
     npm.cmd run build
 
 Copy the built plugin into the active Tabby plugin folder:
@@ -101,14 +110,18 @@ For now, routine plugin verification uses short planned Tabby restart windows. U
 - Not verified across all reconnect and restore paths.
 - Command parsing is deliberately simple.
 - Multiline commands may not be represented perfectly.
+- Copy output is based on the latest command block, not an older scroll-position-aware command block.
+- v0 does not have a shell-level completion signal, so trailing prompt text may be included in copied output.
+- Output capture is available through the middleware path only, not through the legacy input observable fallback.
 - Shell prompts and terminal control sequences can vary by shell, theme, and remote host.
-- The plugin should not log raw terminal input.
+- The plugin should not log raw terminal input or output.
 
 ## Non-goals for v0
 
 - Perfect shell parsing
 - Perfect tmux or screen support
 - Full VS Code sticky-scroll parity
+- Scroll-position-aware history for older command blocks
 - npm publishing before an explicit release decision
 - A guarantee that every terminal workflow is covered
 
