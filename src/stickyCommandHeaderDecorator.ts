@@ -23,6 +23,11 @@ interface CommandBlock {
   truncated: boolean
 }
 
+interface HeredocState {
+  delimiter: string
+  allowLeadingTabs: boolean
+}
+
 const MAX_COMMAND_BLOCKS = 20
 const MAX_OUTPUT_CHARS_PER_BLOCK = 256 * 1024
 const COPY_STATUS_TIMEOUT_MS = 1800
@@ -31,12 +36,27 @@ const BRAILLE_SPINNER_FRAMES = new Set([
   '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏', '⠋',
 ])
 const ASCII_SPINNER_FRAMES = new Set(['|', '/', '-', '\\'])
-const SIMPLE_HEREDOC_OPERATOR = /(?:^|[\s;&|])<<-?\s*(?:"([^"\r\n]+)"|'([^'\r\n]+)'|([A-Za-z0-9_./-]+))(?=\s|$)/
+const SIMPLE_HEREDOC_OPERATOR = /(?:^|[\s;&|])<<(-?)\s*(?:"([^"\r\n]+)"|'([^'\r\n]+)'|([A-Za-z0-9_./-]+))(?=\s|$)/
 
-const getSimpleHeredocDelimiter = (command: string): string | null => {
+const getSimpleHeredocState = (command: string): HeredocState | null => {
   const match = command.match(SIMPLE_HEREDOC_OPERATOR)
 
-  return match ? match[1] || match[2] || match[3] : null
+  if (!match) {
+    return null
+  }
+
+  return {
+    delimiter: match[2] || match[3] || match[4],
+    allowLeadingTabs: match[1] === '-',
+  }
+}
+
+const isHeredocTerminator = (line: string, heredoc: HeredocState): boolean => {
+  if (!heredoc.allowLeadingTabs) {
+    return line === heredoc.delimiter
+  }
+
+  return line.replace(/^\t+/, '') === heredoc.delimiter
 }
 
 const normaliseCarriageReturnsForCopy = (output: string): string => {
@@ -253,7 +273,7 @@ export class StickyCommandHeaderDecorator extends TerminalDecorator {
 
     let pendingInput = ''
     let lastCommand = ''
-    let heredocDelimiter: string | null = null
+    let heredoc: HeredocState | null = null
     let currentBlock: CommandBlock | null = null
     let commandBlocks: CommandBlock[] = []
     let alternateScreenActive = false
@@ -348,6 +368,7 @@ export class StickyCommandHeaderDecorator extends TerminalDecorator {
             char !== '\r' &&
             char !== '\n' &&
             char !== '\u0008' &&
+            char !== '\t' &&
             char !== '\u007f'
           ) {
             continue
@@ -375,7 +396,7 @@ export class StickyCommandHeaderDecorator extends TerminalDecorator {
 
           state = 'normal'
 
-          if (char === '\r' || char === '\n' || char === '\u0008' || char === '\u007f' || char >= ' ') {
+          if (char === '\r' || char === '\n' || char === '\u0008' || char === '\t' || char === '\u007f' || char >= ' ') {
             filtered += char
           }
 
@@ -436,11 +457,12 @@ export class StickyCommandHeaderDecorator extends TerminalDecorator {
 
       for (const char of text) {
         if (char === '\r' || char === '\n') {
+          const submittedLine = pendingInput
           const command = pendingInput.trim()
 
-          if (heredocDelimiter) {
-            if (command === heredocDelimiter) {
-              heredocDelimiter = null
+          if (heredoc) {
+            if (isHeredocTerminator(submittedLine, heredoc)) {
+              heredoc = null
             }
 
             pendingInput = ''
@@ -449,10 +471,10 @@ export class StickyCommandHeaderDecorator extends TerminalDecorator {
           }
 
           if (command) {
-            const nextHeredocDelimiter = getSimpleHeredocDelimiter(command)
+            const nextHeredoc = getSimpleHeredocState(command)
 
-            if (nextHeredocDelimiter) {
-              heredocDelimiter = nextHeredocDelimiter
+            if (nextHeredoc) {
+              heredoc = nextHeredoc
             }
 
             lastCommand = command
@@ -485,7 +507,7 @@ export class StickyCommandHeaderDecorator extends TerminalDecorator {
           continue
         }
 
-        if (char >= ' ') {
+        if (char === '\t' || char >= ' ') {
           pendingInput += char
         }
       }
@@ -610,7 +632,7 @@ export class StickyCommandHeaderDecorator extends TerminalDecorator {
     if (terminal.sessionChanged$) {
       const sessionChangedSubscription = terminal.sessionChanged$.subscribe(() => {
         pendingInput = ''
-        heredocDelimiter = null
+        heredoc = null
         inputControlSequenceState = 'normal'
         outputControlSequenceState = 'normal'
         currentBlock = null
