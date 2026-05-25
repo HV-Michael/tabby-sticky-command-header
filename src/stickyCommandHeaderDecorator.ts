@@ -34,33 +34,38 @@ const ASCII_SPINNER_FRAMES = new Set(['|', '/', '-', '\\'])
 
 const normaliseCarriageReturnsForCopy = (output: string): string => {
   const lines: string[] = []
-  let currentLine = ''
+  let currentLine: string[] = []
+  let cursor = 0
+  const chars = Array.from(output)
 
-  for (let index = 0; index < output.length; index++) {
-    const char = output[index]
+  for (let index = 0; index < chars.length; index++) {
+    const char = chars[index]
 
     if (char === '\r') {
-      if (output[index + 1] === '\n') {
-        lines.push(currentLine)
-        currentLine = ''
+      if (chars[index + 1] === '\n') {
+        lines.push(currentLine.join(''))
+        currentLine = []
+        cursor = 0
         index++
         continue
       }
 
-      currentLine = ''
+      cursor = 0
       continue
     }
 
     if (char === '\n') {
-      lines.push(currentLine)
-      currentLine = ''
+      lines.push(currentLine.join(''))
+      currentLine = []
+      cursor = 0
       continue
     }
 
-    currentLine += char
+    currentLine[cursor] = char
+    cursor++
   }
 
-  lines.push(currentLine)
+  lines.push(currentLine.join(''))
 
   return lines.join('\n')
 }
@@ -87,37 +92,62 @@ const stripBrailleSpinnerRuns = (line: string): string => {
   return chars.slice(start, end).join('')
 }
 
-const isAsciiSpinnerOnlyLine = (line: string): boolean => {
-  return ASCII_SPINNER_FRAMES.has(line.trim())
+const getAsciiSpinnerOnlyFrame = (line: string): string | null => {
+  const trimmedLine = line.trim()
+
+  return ASCII_SPINNER_FRAMES.has(trimmedLine) ? trimmedLine : null
 }
 
-const isAsciiSpinnerNoise = (lines: string[], index: number): boolean => {
-  if (!isAsciiSpinnerOnlyLine(lines[index])) {
-    return false
+const findAsciiSpinnerNoiseLines = (lines: string[]): Set<number> => {
+  const noiseLines = new Set<number>()
+  let runStart: number | null = null
+  let runFrames = new Set<string>()
+
+  const markRun = (runEnd: number): void => {
+    if (runStart === null) {
+      return
+    }
+
+    if (runEnd - runStart >= 3 || runFrames.size >= 2) {
+      for (let index = runStart; index < runEnd; index++) {
+        noiseLines.add(index)
+      }
+    }
+
+    runStart = null
+    runFrames = new Set<string>()
   }
 
-  const cluster = [lines[index].trim()]
+  for (let index = 0; index < lines.length; index++) {
+    const frame = getAsciiSpinnerOnlyFrame(lines[index])
 
-  for (let previous = index - 1; previous >= 0 && isAsciiSpinnerOnlyLine(lines[previous]); previous--) {
-    cluster.push(lines[previous].trim())
+    if (!frame) {
+      markRun(index)
+      continue
+    }
+
+    if (runStart === null) {
+      runStart = index
+    }
+
+    runFrames.add(frame)
   }
 
-  for (let next = index + 1; next < lines.length && isAsciiSpinnerOnlyLine(lines[next]); next++) {
-    cluster.push(lines[next].trim())
-  }
+  markRun(lines.length)
 
-  return cluster.length >= 3 || new Set(cluster).size >= 2
+  return noiseLines
 }
 
 const formatOutputForCopy = (output: string): string => {
   const lines = normaliseCarriageReturnsForCopy(output).split('\n')
+  const asciiSpinnerNoiseLines = findAsciiSpinnerNoiseLines(lines)
 
   return lines
     .map(line => ({
       originalLine: line,
       cleanedLine: stripBrailleSpinnerRuns(line),
     }))
-    .filter((line, index) => !isBrailleSpinnerOnlyLine(line.originalLine) && !isAsciiSpinnerNoise(lines, index))
+    .filter((line, index) => !isBrailleSpinnerOnlyLine(line.originalLine) && !asciiSpinnerNoiseLines.has(index))
     .map(line => line.cleanedLine)
     .join('\n')
 }
