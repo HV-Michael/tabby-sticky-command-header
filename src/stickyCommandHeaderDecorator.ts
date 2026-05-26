@@ -21,6 +21,7 @@ interface CommandBlock {
   output: string
   active: boolean
   truncated: boolean
+  startMarker?: XtermMarker
 }
 
 interface HeredocState {
@@ -28,9 +29,42 @@ interface HeredocState {
   allowLeadingTabs: boolean
 }
 
+interface XtermMarker {
+  line: number
+  isDisposed?: boolean
+  dispose?: () => void
+}
+
+interface XtermBuffer {
+  type?: string
+  baseY?: number
+  viewportY?: number
+  length?: number
+}
+
+interface XtermLike {
+  buffer?: {
+    active?: XtermBuffer
+  }
+  rows?: number
+  onResize?: (listener: (size: { cols: number, rows: number }) => void) => { dispose?: () => void }
+  onScroll?: (listener: (viewportY: number) => void) => { dispose?: () => void }
+  registerMarker?: (cursorYOffset?: number) => XtermMarker | undefined
+}
+
+type CommandBlockResolution =
+  | { kind: 'block', block: CommandBlock }
+  | { kind: 'fallback', block: CommandBlock }
+  | { kind: 'uncertain' }
+
 const MAX_COMMAND_BLOCKS = 20
 const MAX_OUTPUT_CHARS_PER_BLOCK = 256 * 1024
 const COPY_STATUS_TIMEOUT_MS = 1800
+const DEBUG_STICKY_COMMAND_RESOLVER = false
+const DEBUG_STICKY_COMMAND_RESOLVER_PREFIX = '[TSC resolver]'
+const STICKY_COMMAND_HEADER_CLASS = 'tabby-sticky-command-header'
+const STICKY_COMMAND_HEADER_OWNER_ATTRIBUTE = 'data-tabby-sticky-command-header-owner'
+const STICKY_COMMAND_HEADER_LABEL_ATTRIBUTE = 'data-tabby-sticky-command-header-label'
 const BRAILLE_SPINNER_FRAMES = new Set([
   '⣾', '⣽', '⣻', '⢿', '⡿', '⣟', '⣯', '⣷',
   '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏', '⠋',
@@ -214,9 +248,13 @@ export class StickyCommandHeaderDecorator extends TerminalDecorator {
 
     host.style.position = host.style.position || 'relative'
 
-    const header = document.createElement('div')
+    host.querySelectorAll(`.${STICKY_COMMAND_HEADER_CLASS}`).forEach(existingHeader => existingHeader.remove())
 
-    header.className = 'tabby-sticky-command-header'
+    const header = document.createElement('div')
+    const headerOwnerId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
+
+    header.className = STICKY_COMMAND_HEADER_CLASS
+    header.setAttribute(STICKY_COMMAND_HEADER_OWNER_ATTRIBUTE, headerOwnerId)
     header.style.display = 'none'
     header.style.position = 'absolute'
     header.style.top = '0'
@@ -238,6 +276,7 @@ export class StickyCommandHeaderDecorator extends TerminalDecorator {
 
     const commandLabel = document.createElement('span')
 
+    commandLabel.setAttribute(STICKY_COMMAND_HEADER_LABEL_ATTRIBUTE, 'command')
     commandLabel.style.flex = '1 1 auto'
     commandLabel.style.minWidth = '0'
     commandLabel.style.overflow = 'hidden'
@@ -278,38 +317,389 @@ export class StickyCommandHeaderDecorator extends TerminalDecorator {
     let commandBlocks: CommandBlock[] = []
     let alternateScreenActive = false
     let viewport: HTMLElement | null = null
+    let displayedBlock: CommandBlock | null = null
     let inputControlSequenceState: ControlSequenceState = 'normal'
     let outputControlSequenceState: ControlSequenceState = 'normal'
     let statusTimeout: number | null = null
     let capture: StickyCommandHeaderCapture | null = null
     let captureMiddlewareStack: any = null
     let inputSubscription: any = null
+    let xtermScrollSubscription: { dispose?: () => void } | null = null
+    let xtermResizeSubscription: { dispose?: () => void } | null = null
 
-    const isAtBottom = (): boolean => {
-      if (!viewport) {
-        return true
-      }
-
-      return viewport.scrollTop + viewport.clientHeight >= viewport.scrollHeight - 4
+    const getOwnedHeaders = (): HTMLElement[] => {
+      return Array.from(host.querySelectorAll(`.${STICKY_COMMAND_HEADER_CLASS}`)) as HTMLElement[]
     }
 
-    const getCurrentCopyableBlock = (): CommandBlock | null => {
-      if (!currentBlock || alternateScreenActive || !currentBlock.output.trim()) {
+    const ensureSingleOwnedHeader = (): HTMLElement[] => {
+      if (!header.isConnected) {
+        host.appendChild(header)
+      }
+
+      const ownedHeaders = getOwnedHeaders()
+
+      for (const ownedHeader of ownedHeaders) {
+        if (ownedHeader !== header) {
+          ownedHeader.remove()
+        }
+      }
+
+      return getOwnedHeaders()
+    }
+
+    const isHeaderVisible = (): boolean => {
+      return header.isConnected && header.style.display !== 'none'
+    }
+
+    const getShortCommandLabel = (block: CommandBlock | null | undefined): string | null => {
+      if (!block) {
         return null
       }
 
-      return currentBlock
+      const label = block.command.replace(/\s+/g, ' ').trim()
+
+      return label.length > 72 ? `${label.slice(0, 69)}...` : label
     }
 
-    const updateHeader = (): void => {
-      if (!lastCommand || alternateScreenActive || isAtBottom()) {
-        header.style.display = 'none'
+    const disposeBlockMarkers = (block: CommandBlock): void => {
+      block.startMarker?.dispose?.()
+      block.startMarker = undefined
+    }
+
+    const clearCommandBlocks = (): void => {
+      commandBlocks.forEach(disposeBlockMarkers)
+      commandBlocks = []
+    }
+
+    const trimCommandBlocks = (): void => {
+      if (commandBlocks.length <= MAX_COMMAND_BLOCKS) {
         return
       }
 
-      commandLabel.textContent = `Command: ${lastCommand}`
-      copyButton.style.display = getCurrentCopyableBlock() ? 'inline-block' : 'none'
+      const removedBlocks = commandBlocks.slice(0, commandBlocks.length - MAX_COMMAND_BLOCKS)
+
+      removedBlocks.forEach(disposeBlockMarkers)
+      commandBlocks = commandBlocks.slice(-MAX_COMMAND_BLOCKS)
+    }
+
+    const getXterm = (): XtermLike | null => {
+      const xterm = terminal.frontend?.xterm
+
+      if (!xterm || typeof xterm !== 'object') {
+        return null
+      }
+
+      return xterm as XtermLike
+    }
+
+    const getNormalXtermBuffer = (): XtermBuffer | null => {
+      const buffer = getXterm()?.buffer?.active
+
+      if (!buffer || buffer.type !== 'normal') {
+        return null
+      }
+
+      return buffer
+    }
+
+    const registerBlockStartMarker = (cursorYOffset = 0): XtermMarker | undefined => {
+      if (alternateScreenActive || !getNormalXtermBuffer()) {
+        return undefined
+      }
+
+      const xterm = getXterm()
+      const registerMarker = xterm?.registerMarker
+
+      if (typeof registerMarker !== 'function') {
+        return undefined
+      }
+
+      try {
+        return registerMarker.call(xterm, cursorYOffset)
+      } catch {
+        return undefined
+      }
+    }
+
+    const getViewportTopLine = (): number | null => {
+      if (alternateScreenActive) {
+        return null
+      }
+
+      const viewportY = getNormalXtermBuffer()?.viewportY
+
+      return typeof viewportY === 'number' && Number.isFinite(viewportY) ? viewportY : null
+    }
+
+    const getBufferLength = (): number | null => {
+      const length = getNormalXtermBuffer()?.length
+
+      return typeof length === 'number' && Number.isFinite(length) && length >= 0 ? length : null
+    }
+
+    const getViewportRows = (): number | null => {
+      const rows = getXterm()?.rows
+
+      return typeof rows === 'number' && Number.isFinite(rows) && rows > 0 ? rows : null
+    }
+
+    const getMarkerLine = (marker: XtermMarker | undefined): number | null => {
+      if (!marker || marker.isDisposed || marker.line < 0) {
+        return null
+      }
+
+      return Number.isFinite(marker.line) ? marker.line : null
+    }
+
+    const getBottomState = (): { result: boolean, rule: string } => {
+      if (alternateScreenActive) {
+        return { result: false, rule: 'alternate-screen' }
+      }
+
+      const buffer = getNormalXtermBuffer()
+      const viewportY = buffer?.viewportY
+      const baseY = buffer?.baseY
+
+      if (
+        typeof viewportY === 'number' &&
+        Number.isFinite(viewportY) &&
+        typeof baseY === 'number' &&
+        Number.isFinite(baseY)
+      ) {
+        return { result: viewportY >= baseY, rule: 'viewportY>=baseY' }
+      }
+
+      const viewportTopLine = getViewportTopLine()
+      const bufferLength = getBufferLength()
+      const viewportRows = getViewportRows()
+
+      if (viewportTopLine !== null && bufferLength !== null && viewportRows !== null) {
+        return { result: viewportTopLine + viewportRows >= bufferLength, rule: 'viewportY+rows>=length' }
+      }
+
+      if (!viewport) {
+        return { result: false, rule: 'no-dom-viewport' }
+      }
+
+      return {
+        result: viewport.scrollTop + viewport.clientHeight >= viewport.scrollHeight - 4,
+        rule: 'dom-scroll',
+      }
+    }
+
+    const isAtBottom = (): boolean => {
+      return getBottomState().result
+    }
+
+    const resolveVisibleCommandBlock = (): CommandBlockResolution => {
+      if (alternateScreenActive) {
+        return { kind: 'uncertain' }
+      }
+
+      if (isAtBottom() && currentBlock) {
+        return { kind: 'fallback', block: currentBlock }
+      }
+
+      const viewportTopLine = getViewportTopLine()
+
+      if (viewportTopLine === null) {
+        return { kind: 'uncertain' }
+      }
+
+      if (!commandBlocks.length) {
+        return { kind: 'uncertain' }
+      }
+
+      const bufferLength = getBufferLength()
+      const markerBackedBlocks: Array<{ block: CommandBlock, startLine: number, blockIndex: number }> = []
+
+      for (let blockIndex = 0; blockIndex < commandBlocks.length; blockIndex++) {
+        const block = commandBlocks[blockIndex]
+        const startLine = getMarkerLine(block.startMarker)
+
+        if (startLine === null) {
+          continue
+        }
+
+        const previousStartLine = markerBackedBlocks[markerBackedBlocks.length - 1]?.startLine
+
+        if (previousStartLine !== undefined && startLine <= previousStartLine) {
+          return { kind: 'uncertain' }
+        }
+
+        markerBackedBlocks.push({ block, startLine, blockIndex })
+      }
+
+      if (!markerBackedBlocks.length) {
+        return { kind: 'uncertain' }
+      }
+
+      for (let index = 0; index < markerBackedBlocks.length; index++) {
+        const range = markerBackedBlocks[index]
+        const nextRange = markerBackedBlocks[index + 1]
+        const endLine = nextRange?.startLine ?? (
+          range.blockIndex === commandBlocks.length - 1 ? bufferLength : null
+        )
+
+        if (endLine === null || endLine <= range.startLine) {
+          return { kind: 'uncertain' }
+        }
+
+        const rangeCrossesMarkerlessBlock = nextRange
+          ? nextRange.blockIndex > range.blockIndex + 1
+          : range.blockIndex !== commandBlocks.length - 1
+
+        if (rangeCrossesMarkerlessBlock && range.startLine <= viewportTopLine && viewportTopLine < endLine) {
+          return { kind: 'uncertain' }
+        }
+
+        if (range.startLine <= viewportTopLine && viewportTopLine < endLine) {
+          return { kind: 'block', block: range.block }
+        }
+      }
+
+      return { kind: 'uncertain' }
+    }
+
+    const getResolutionKindLabel = (resolution: CommandBlockResolution): string => {
+      if (resolution.kind === 'block') {
+        return 'marker'
+      }
+
+      if (resolution.kind === 'fallback') {
+        return 'bottom'
+      }
+
+      return 'uncertain'
+    }
+
+    const debugResolver = (
+      source: string,
+      details: {
+        onScrollValue?: number
+        resize?: { cols: number, rows: number }
+        resolution?: CommandBlockResolution
+        headerShown?: boolean
+        displayedBlockBeforeUpdate?: CommandBlock | null
+        headerTextBeforeUpdate?: string
+        headerTextAfterUpdate?: string
+        ownedHeaderCount?: number
+        headerConnected?: boolean
+        headerVisible?: boolean
+      } = {},
+    ): void => {
+      if (!DEBUG_STICKY_COMMAND_RESOLVER) {
+        return
+      }
+
+      const xterm = getXterm()
+      const buffer = xterm?.buffer?.active
+      const viewportY = buffer?.viewportY
+      const rows = xterm?.rows
+      const bottomState = getBottomState()
+      const resolution = details.resolution ?? resolveVisibleCommandBlock()
+      const resolvedBlock = resolution.kind === 'uncertain' ? null : resolution.block
+      const viewportBottom = (
+        typeof viewportY === 'number' &&
+        Number.isFinite(viewportY) &&
+        typeof rows === 'number' &&
+        Number.isFinite(rows)
+      ) ? viewportY + rows - 1 : null
+
+      console.log(DEBUG_STICKY_COMMAND_RESOLVER_PREFIX, {
+        source,
+        onScrollValue: details.onScrollValue,
+        resize: details.resize,
+        activeBufferType: buffer?.type ?? null,
+        viewportY: typeof viewportY === 'number' ? viewportY : null,
+        baseY: typeof buffer?.baseY === 'number' ? buffer.baseY : null,
+        length: typeof buffer?.length === 'number' ? buffer.length : null,
+        rows: typeof rows === 'number' ? rows : null,
+        viewportBottom,
+        isAtBottom: bottomState.result,
+        isAtBottomRule: bottomState.rule,
+        currentBlock: getShortCommandLabel(currentBlock),
+        displayedBlockBeforeUpdate: getShortCommandLabel(
+          details.displayedBlockBeforeUpdate === undefined ? displayedBlock : details.displayedBlockBeforeUpdate,
+        ),
+        resolvedBlock: getShortCommandLabel(resolvedBlock),
+        resolvedKind: getResolutionKindLabel(resolution),
+        copyableBlock: getShortCommandLabel(getCopyableBlock()),
+        commandBlocks: commandBlocks.map((block, index) => ({
+          index,
+          label: getShortCommandLabel(block),
+          markerLine: typeof block.startMarker?.line === 'number' ? block.startMarker.line : null,
+          markerDisposed: block.startMarker?.line === -1 || block.startMarker?.isDisposed === true,
+          isDisposed: block.startMarker?.isDisposed ?? null,
+          storedStartLine: (block as any).startLine ?? null,
+          storedEndLine: (block as any).endLine ?? null,
+          storedOutputCount: (block as any).outputCount ?? null,
+          outputChars: block.output.length,
+          outputLines: block.output ? normaliseCarriageReturnsForCopy(block.output).split('\n').length : 0,
+          active: block.active,
+          truncated: block.truncated,
+        })),
+        headerShown: details.headerShown ?? header.style.display !== 'none',
+        headerOwnerId,
+        ownedHeaderCount: details.ownedHeaderCount ?? getOwnedHeaders().length,
+        headerTextBeforeUpdate: details.headerTextBeforeUpdate,
+        headerTextAfterUpdate: details.headerTextAfterUpdate ?? commandLabel.textContent,
+        headerConnected: details.headerConnected ?? header.isConnected,
+        headerVisible: details.headerVisible ?? isHeaderVisible(),
+      })
+    }
+
+    const getCopyableBlock = (): CommandBlock | null => {
+      const block = displayedBlock
+
+      if (!block || !block.output.trim()) {
+        return null
+      }
+
+      return block
+    }
+
+    const updateHeader = (source = 'manual update', details: { onScrollValue?: number, resize?: { cols: number, rows: number } } = {}): void => {
+      const resolution = resolveVisibleCommandBlock()
+      const block = resolution.kind === 'uncertain' ? null : resolution.block
+      const displayedBlockBeforeUpdate = displayedBlock
+      const headerTextBeforeUpdate = commandLabel.textContent
+      const ownedHeaders = ensureSingleOwnedHeader()
+
+      displayedBlock = block
+
+      if (!block || alternateScreenActive) {
+        commandLabel.textContent = ''
+        header.style.display = 'none'
+        copyButton.style.display = 'none'
+        debugResolver(source, {
+          ...details,
+          resolution,
+          headerShown: false,
+          displayedBlockBeforeUpdate,
+          headerTextBeforeUpdate,
+          headerTextAfterUpdate: commandLabel.textContent,
+          ownedHeaderCount: ownedHeaders.length,
+          headerConnected: header.isConnected,
+          headerVisible: isHeaderVisible(),
+        })
+        return
+      }
+
+      commandLabel.textContent = `Command: ${block.command}`
+      copyButton.style.display = block.output.trim() ? 'inline-block' : 'none'
       header.style.display = 'flex'
+      debugResolver(source, {
+        ...details,
+        resolution,
+        headerShown: true,
+        displayedBlockBeforeUpdate,
+        headerTextBeforeUpdate,
+        headerTextAfterUpdate: commandLabel.textContent,
+        ownedHeaderCount: ownedHeaders.length,
+        headerConnected: header.isConnected,
+        headerVisible: isHeaderVisible(),
+      })
     }
 
     const setStatus = (message: string): void => {
@@ -325,14 +715,45 @@ export class StickyCommandHeaderDecorator extends TerminalDecorator {
       }, COPY_STATUS_TIMEOUT_MS)
     }
 
+    const handleDomScroll = (): void => {
+      updateHeader('DOM scroll')
+    }
+
     const findViewport = (): void => {
+      if (viewport) {
+        viewport.removeEventListener('scroll', handleDomScroll)
+      }
+
       viewport = host.querySelector('.xterm-viewport') as HTMLElement | null
 
       if (viewport) {
-        viewport.addEventListener('scroll', updateHeader)
+        viewport.addEventListener('scroll', handleDomScroll)
       }
 
-      updateHeader()
+      updateHeader('attach')
+    }
+
+    const attachXtermEventDiagnostics = (): void => {
+      const xterm = getXterm()
+
+      if (!xterm) {
+        debugResolver('attach')
+        return
+      }
+
+      if (!xtermScrollSubscription && typeof xterm.onScroll === 'function') {
+        xtermScrollSubscription = xterm.onScroll((viewportY: number) => {
+          updateHeader('xterm onScroll', { onScrollValue: viewportY })
+        })
+      }
+
+      if (!xtermResizeSubscription && typeof xterm.onResize === 'function') {
+        xtermResizeSubscription = xterm.onResize((size: { cols: number, rows: number }) => {
+          updateHeader('resize', { resize: size })
+        })
+      }
+
+      updateHeader('attach')
     }
 
     const filterTerminalText = (text: string, initialState: ControlSequenceState): FilteredTerminalText => {
@@ -466,9 +887,11 @@ export class StickyCommandHeaderDecorator extends TerminalDecorator {
             }
 
             pendingInput = ''
-            updateHeader()
+            updateHeader('command input')
             continue
           }
+
+          const startedCommand = Boolean(command)
 
           if (command) {
             const nextHeredoc = getSimpleHeredocState(command)
@@ -488,16 +911,14 @@ export class StickyCommandHeaderDecorator extends TerminalDecorator {
               output: '',
               active: true,
               truncated: false,
+              startMarker: registerBlockStartMarker(0),
             }
             commandBlocks.push(currentBlock)
-
-            if (commandBlocks.length > MAX_COMMAND_BLOCKS) {
-              commandBlocks = commandBlocks.slice(-MAX_COMMAND_BLOCKS)
-            }
+            trimCommandBlocks()
           }
 
           pendingInput = ''
-          updateHeader()
+          updateHeader(startedCommand ? 'command start' : 'command input')
 
           continue
         }
@@ -528,6 +949,11 @@ export class StickyCommandHeaderDecorator extends TerminalDecorator {
       }
 
       text = text.replace(/\r\n/g, '\n')
+
+      if (!currentBlock.output && !currentBlock.startMarker) {
+        currentBlock.startMarker = registerBlockStartMarker(0)
+      }
+
       currentBlock.output += text
 
       if (currentBlock.output.length > MAX_OUTPUT_CHARS_PER_BLOCK) {
@@ -535,7 +961,7 @@ export class StickyCommandHeaderDecorator extends TerminalDecorator {
         currentBlock.truncated = true
       }
 
-      updateHeader()
+      updateHeader('command output')
     }
 
     const writeClipboardText = async (text: string): Promise<void> => {
@@ -564,7 +990,10 @@ export class StickyCommandHeaderDecorator extends TerminalDecorator {
     }
 
     const copyCurrentOutput = async (): Promise<void> => {
-      const block = getCurrentCopyableBlock()
+      debugResolver('copy click before update')
+      updateHeader('copy click after update')
+      const block = getCopyableBlock()
+      debugResolver('copy click selected block')
 
       if (!block) {
         setStatus('No output')
@@ -636,10 +1065,10 @@ export class StickyCommandHeaderDecorator extends TerminalDecorator {
         inputControlSequenceState = 'normal'
         outputControlSequenceState = 'normal'
         currentBlock = null
-        commandBlocks = []
+        clearCommandBlocks()
         lastCommand = ''
         attachCapture()
-        updateHeader()
+        updateHeader('attach')
       })
 
       this.subscribeUntilDetached(terminal, sessionChangedSubscription)
@@ -647,16 +1076,17 @@ export class StickyCommandHeaderDecorator extends TerminalDecorator {
 
     const alternateScreenSubscription = terminal.alternateScreenActive$.subscribe(active => {
       alternateScreenActive = active
-      updateHeader()
+      updateHeader('content update')
     })
 
     this.subscribeUntilDetached(terminal, alternateScreenSubscription)
 
     const frontendReadySubscription = terminal.frontendReady$.subscribe(() => {
       window.setTimeout(findViewport, 250)
+      attachXtermEventDiagnostics()
 
       if (terminal.frontend) {
-        const contentSubscription = terminal.frontend.contentUpdated$.subscribe(updateHeader)
+        const contentSubscription = terminal.frontend.contentUpdated$.subscribe(() => updateHeader('content update'))
 
         this.subscribeUntilDetached(terminal, contentSubscription)
       }
@@ -664,6 +1094,7 @@ export class StickyCommandHeaderDecorator extends TerminalDecorator {
 
     this.subscribeUntilDetached(terminal, frontendReadySubscription)
 
+    attachXtermEventDiagnostics()
     window.setTimeout(findViewport, 500)
 
     this.cleanup.set(terminal, () => {
@@ -674,11 +1105,17 @@ export class StickyCommandHeaderDecorator extends TerminalDecorator {
         statusTimeout = null
       }
 
+      clearCommandBlocks()
       copyButton.removeEventListener('click', handleCopyClick)
 
       if (viewport) {
-        viewport.removeEventListener('scroll', updateHeader)
+        viewport.removeEventListener('scroll', handleDomScroll)
       }
+
+      xtermScrollSubscription?.dispose?.()
+      xtermScrollSubscription = null
+      xtermResizeSubscription?.dispose?.()
+      xtermResizeSubscription = null
 
       header.remove()
     })
