@@ -257,22 +257,24 @@ export class StickyCommandHeaderDecorator extends TerminalDecorator {
     header.setAttribute(STICKY_COMMAND_HEADER_OWNER_ATTRIBUTE, headerOwnerId)
     header.style.display = 'none'
     header.style.position = 'absolute'
-    header.style.top = '0'
-    header.style.left = '0'
-    header.style.right = '0'
-    header.style.zIndex = '100'
-    header.style.padding = '4px 8px'
+    header.style.top = '4px'
+    header.style.left = '6px'
+    header.style.maxWidth = 'calc(100% - 12px)'
+    header.style.zIndex = '20'
+    header.style.padding = '2px 6px'
     header.style.fontFamily = 'var(--font-family, monospace)'
     header.style.fontSize = '12px'
-    header.style.lineHeight = '18px'
+    header.style.lineHeight = '16px'
     header.style.whiteSpace = 'nowrap'
     header.style.overflow = 'hidden'
     header.style.textOverflow = 'ellipsis'
-    header.style.background = 'rgba(0, 0, 0, 0.82)'
+    header.style.background = 'rgba(0, 0, 0, 0.74)'
     header.style.color = '#fff'
     header.style.pointerEvents = 'none'
     header.style.alignItems = 'center'
-    header.style.gap = '8px'
+    header.style.gap = '6px'
+    header.style.borderRadius = '4px'
+    header.style.boxShadow = '0 1px 3px rgba(0, 0, 0, 0.32)'
 
     const commandLabel = document.createElement('span')
 
@@ -286,15 +288,18 @@ export class StickyCommandHeaderDecorator extends TerminalDecorator {
     const copyButton = document.createElement('button')
 
     copyButton.type = 'button'
-    copyButton.textContent = 'Copy output'
+    copyButton.textContent = 'Copy'
+    copyButton.title = 'Copy output'
+    copyButton.setAttribute('aria-label', 'Copy output')
     copyButton.style.flex = '0 0 auto'
-    copyButton.style.border = '1px solid rgba(255, 255, 255, 0.35)'
+    copyButton.style.border = '1px solid rgba(255, 255, 255, 0.22)'
     copyButton.style.borderRadius = '4px'
-    copyButton.style.padding = '1px 6px'
+    copyButton.style.padding = '0 5px'
     copyButton.style.font = 'inherit'
-    copyButton.style.lineHeight = '16px'
-    copyButton.style.background = 'rgba(255, 255, 255, 0.12)'
-    copyButton.style.color = 'inherit'
+    copyButton.style.fontSize = '11px'
+    copyButton.style.lineHeight = '15px'
+    copyButton.style.background = 'rgba(255, 255, 255, 0.08)'
+    copyButton.style.color = 'rgba(255, 255, 255, 0.78)'
     copyButton.style.cursor = 'pointer'
     copyButton.style.pointerEvents = 'auto'
 
@@ -491,6 +496,38 @@ export class StickyCommandHeaderDecorator extends TerminalDecorator {
       return getBottomState().result
     }
 
+    const resolveCandidateBufferLine = (
+      candidateLine: number,
+      markerBackedBlocks: Array<{ block: CommandBlock, startLine: number, blockIndex: number }>,
+      bufferLength: number | null,
+    ): CommandBlock | null => {
+      for (let index = 0; index < markerBackedBlocks.length; index++) {
+        const range = markerBackedBlocks[index]
+        const nextRange = markerBackedBlocks[index + 1]
+        const endLine = nextRange?.startLine ?? (
+          range.blockIndex === commandBlocks.length - 1 ? bufferLength : null
+        )
+
+        if (endLine === null || endLine <= range.startLine) {
+          return null
+        }
+
+        const rangeCrossesMarkerlessBlock = nextRange
+          ? nextRange.blockIndex > range.blockIndex + 1
+          : range.blockIndex !== commandBlocks.length - 1
+
+        if (rangeCrossesMarkerlessBlock && range.startLine <= candidateLine && candidateLine < endLine) {
+          return null
+        }
+
+        if (range.startLine <= candidateLine && candidateLine < endLine) {
+          return range.block
+        }
+      }
+
+      return null
+    }
+
     const resolveVisibleCommandBlock = (): CommandBlockResolution => {
       if (alternateScreenActive) {
         return { kind: 'uncertain' }
@@ -503,6 +540,12 @@ export class StickyCommandHeaderDecorator extends TerminalDecorator {
       const viewportTopLine = getViewportTopLine()
 
       if (viewportTopLine === null) {
+        return { kind: 'uncertain' }
+      }
+
+      const viewportRows = getViewportRows()
+
+      if (viewportRows === null) {
         return { kind: 'uncertain' }
       }
 
@@ -534,31 +577,27 @@ export class StickyCommandHeaderDecorator extends TerminalDecorator {
         return { kind: 'uncertain' }
       }
 
-      for (let index = 0; index < markerBackedBlocks.length; index++) {
-        const range = markerBackedBlocks[index]
-        const nextRange = markerBackedBlocks[index + 1]
-        const endLine = nextRange?.startLine ?? (
-          range.blockIndex === commandBlocks.length - 1 ? bufferLength : null
-        )
+      const maxProbeOffset = Math.min(viewportRows - 1, 5)
+      let resolvedBlock: CommandBlock | null = null
 
-        if (endLine === null || endLine <= range.startLine) {
-          return { kind: 'uncertain' }
+      for (let offset = 0; offset <= maxProbeOffset; offset++) {
+        const candidateBlock = resolveCandidateBufferLine(viewportTopLine + offset, markerBackedBlocks, bufferLength)
+
+        if (!candidateBlock) {
+          continue
         }
 
-        const rangeCrossesMarkerlessBlock = nextRange
-          ? nextRange.blockIndex > range.blockIndex + 1
-          : range.blockIndex !== commandBlocks.length - 1
-
-        if (rangeCrossesMarkerlessBlock && range.startLine <= viewportTopLine && viewportTopLine < endLine) {
-          return { kind: 'uncertain' }
+        if (!resolvedBlock) {
+          resolvedBlock = candidateBlock
+          continue
         }
 
-        if (range.startLine <= viewportTopLine && viewportTopLine < endLine) {
-          return { kind: 'block', block: range.block }
+        if (resolvedBlock !== candidateBlock) {
+          return { kind: 'uncertain' }
         }
       }
 
-      return { kind: 'uncertain' }
+      return resolvedBlock ? { kind: 'block', block: resolvedBlock } : { kind: 'uncertain' }
     }
 
     const getResolutionKindLabel = (resolution: CommandBlockResolution): string => {
@@ -686,7 +725,8 @@ export class StickyCommandHeaderDecorator extends TerminalDecorator {
         return
       }
 
-      commandLabel.textContent = `Command: ${block.command}`
+      commandLabel.textContent = block.command
+      commandLabel.title = block.command
       copyButton.style.display = block.output.trim() ? 'inline-block' : 'none'
       header.style.display = 'flex'
       debugResolver(source, {
