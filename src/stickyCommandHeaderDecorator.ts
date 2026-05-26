@@ -518,7 +518,7 @@ export class StickyCommandHeaderDecorator extends TerminalDecorator {
         const startLine = getMarkerLine(block.startMarker)
 
         if (startLine === null) {
-          return { kind: 'uncertain' }
+          continue
         }
 
         const previousStartLine = markerBackedBlocks[markerBackedBlocks.length - 1]?.startLine
@@ -528,6 +528,10 @@ export class StickyCommandHeaderDecorator extends TerminalDecorator {
         }
 
         markerBackedBlocks.push({ block, startLine, blockIndex })
+      }
+
+      if (!markerBackedBlocks.length) {
+        return { kind: 'uncertain' }
       }
 
       for (let index = 0; index < markerBackedBlocks.length; index++) {
