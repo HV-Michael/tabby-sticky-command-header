@@ -68,6 +68,14 @@ The current implementation has been manually verified for:
 
 Show a sticky command header at the top of the terminal viewport so users can see which command produced the output they are reading, and copy the retained output for the current command when needed.
 
+## Operator workflow expectation
+
+The practical operator workflow is that ChatGPT writes proof commands so the final runnable command emits all required evidence in one labelled output block.
+
+Mike should be able to scroll to that command in Tabby, click **Copy output**, and paste the copied output back to ChatGPT for review.
+
+Good command prompts should therefore use one wrapper command by default, such as a Bash heredoc wrapper or a PowerShell script block, with labelled sections and bounded output. They should not ask Mike to run several independent commands and manually assemble separate outputs unless a wrapper is not practical.
+
 ## Operator-grade target
 
 The intended end state is copyable command evidence that is exact enough for Mike as the operator and ChatGPT as the reviewer.
@@ -80,6 +88,7 @@ Operator-grade behaviour means:
 - copied output preserves useful evidence such as warnings, URLs, JSON, logs, prompts, errors, command results, and section headings;
 - copied output removes obvious terminal animation noise and carriage-return/progress rewrites where safe;
 - copied text clearly says when output has been truncated;
+- copied text is useful without separate terminal scrollback because the command printed the needed context;
 - latest-command copying remains as a safe fallback when scroll mapping is unavailable;
 - raw terminal input and output are not logged or persisted;
 - memory stays bounded;
