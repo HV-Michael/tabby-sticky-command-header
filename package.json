@@ -1,7 +1,7 @@
 {
-  "name": "tabby-sticky-command-header",
+  "name": "tabby-sticky-commands",
   "version": "0.0.1",
-  "description": "Experimental alpha Tabby terminal plugin for a VS Code-style sticky command header.",
+  "description": "Experimental Tabby plugin for sticky command context while scrolling terminal output.",
   "private": true,
   "keywords": [
     "tabby-plugin",
