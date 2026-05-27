@@ -8,6 +8,8 @@
 ![SSH](https://img.shields.io/badge/SSH-tested-4b5563?style=flat-square)
 ![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)
 ![npm](https://img.shields.io/badge/npm-not%20published-lightgrey?style=flat-square&logo=npm)
+![Built with ChatGPT](https://img.shields.io/badge/built%20with-ChatGPT-10a37f?style=flat-square)
+![Coded with Codex](https://img.shields.io/badge/coded%20with-Codex-111827?style=flat-square)
 
 Experimental Tabby terminal plugin for keeping command context visible while scrolling through terminal output.
 
@@ -136,6 +138,10 @@ For now, routine plugin verification uses short planned Tabby restart windows. U
 - Full VS Code sticky-scroll parity
 - npm publishing before an explicit release decision
 - A guarantee that every terminal workflow is covered
+
+## Development credit
+
+This project was built by Mike Pearce with hands-on assistance from ChatGPT and Codex.
 
 ## Related Tabby feature request
 
