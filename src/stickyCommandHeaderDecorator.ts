@@ -71,6 +71,9 @@ const BRAILLE_SPINNER_FRAMES = new Set([
 ])
 const ASCII_SPINNER_FRAMES = new Set(['|', '/', '-', '\\'])
 const SIMPLE_HEREDOC_OPERATOR = /(?:^|[\s;&|])<<(-?)\s*(?:"([^"\r\n]+)"|'([^'\r\n]+)'|([A-Za-z0-9_./-]+))(?=\s|$)/
+const MIN_CLEAR_COMMAND_PREFIX_CHARS = 24
+const BOUNDARY_TRAILING_WINDOW_LINES = 24
+const BOUNDARY_TRAILING_WINDOW_CHARS = 4096
 
 const getSimpleHeredocState = (command: string): HeredocState | null => {
   const match = command.match(SIMPLE_HEREDOC_OPERATOR)
@@ -211,6 +214,240 @@ const formatOutputForCopy = (output: string): string => {
     .filter((line, index) => !isBrailleSpinnerOnlyLine(line.originalLine) && !asciiSpinnerNoiseLines.has(index))
     .map(line => line.cleanedLine)
     .join('\n')
+}
+
+const getSubmittedInputVariants = (submittedLine: string, command: string): string[] => {
+  return Array.from(new Set([submittedLine.trimEnd(), command].filter(Boolean)))
+}
+
+const isLikelyPromptPrefix = (prefix: string): boolean => {
+  const trimmedPrefix = prefix.trimEnd()
+
+  return trimmedPrefix.length > 0 && trimmedPrefix.length <= 160 && /[$#>%\]]$/.test(trimmedPrefix)
+}
+
+const isTrailingEchoedInputLine = (line: string, submittedInputVariants: string[]): boolean => {
+  const normalisedLine = normaliseCarriageReturnsForCopy(line).split('\n').pop() ?? ''
+  const trimmedLine = normalisedLine.trimEnd()
+
+  return submittedInputVariants.some(submittedInput => {
+    if (trimmedLine === submittedInput) {
+      return true
+    }
+
+    if (!trimmedLine.endsWith(submittedInput)) {
+      return false
+    }
+
+    return isLikelyPromptPrefix(trimmedLine.slice(0, -submittedInput.length))
+  })
+}
+
+const trimTrailingEchoedInputFromOutput = (output: string, submittedLine: string, command: string): string => {
+  const submittedInputVariants = getSubmittedInputVariants(submittedLine, command)
+
+  if (!output || !submittedInputVariants.length) {
+    return output
+  }
+
+  const lineStart = Math.max(output.lastIndexOf('\n'), output.lastIndexOf('\r')) + 1
+  const trailingLine = output.slice(lineStart)
+
+  if (!trailingLine || !isTrailingEchoedInputLine(trailingLine, submittedInputVariants)) {
+    return output
+  }
+
+  return output.slice(0, lineStart)
+}
+
+interface BoundaryNormalisedText {
+  text: string
+  rawIndexes: number[]
+}
+
+interface BoundaryCommandMarker {
+  text: string
+  commandText: string
+}
+
+const normaliseTextForBoundaryMatch = (text: string): BoundaryNormalisedText => {
+  const chars: string[] = []
+  const rawIndexes: number[] = []
+
+  for (let index = 0; index < text.length; index++) {
+    const char = text[index]
+
+    if (char === '\u0008' || char === '\u007f') {
+      chars.pop()
+      rawIndexes.pop()
+      continue
+    }
+
+    if (char < ' ' && char !== '\t') {
+      continue
+    }
+
+    chars.push(char)
+    rawIndexes.push(index)
+  }
+
+  return {
+    text: chars.join(''),
+    rawIndexes,
+  }
+}
+
+const addBoundaryCommandMarkers = (
+  markers: BoundaryCommandMarker[],
+  seenMarkers: Set<string>,
+  commandText: string,
+): void => {
+  const trimmedCommandText = commandText.trimEnd()
+
+  if (!trimmedCommandText || seenMarkers.has(trimmedCommandText)) {
+    return
+  }
+
+  seenMarkers.add(trimmedCommandText)
+  markers.push({
+    text: trimmedCommandText,
+    commandText: trimmedCommandText,
+  })
+
+  const minPrefixLength = Math.min(
+    trimmedCommandText.length,
+    Math.max(MIN_CLEAR_COMMAND_PREFIX_CHARS, Math.ceil(trimmedCommandText.length * 0.35)),
+  )
+
+  if (trimmedCommandText.length > minPrefixLength) {
+    const prefix = trimmedCommandText.slice(0, minPrefixLength)
+
+    if (!seenMarkers.has(prefix)) {
+      seenMarkers.add(prefix)
+      markers.push({
+        text: prefix,
+        commandText: trimmedCommandText,
+      })
+    }
+  }
+}
+
+const getBoundaryCommandMarkers = (command: string): BoundaryCommandMarker[] => {
+  const normalisedCommand = normaliseTextForBoundaryMatch(command).text.trim()
+  const markers: BoundaryCommandMarker[] = []
+  const seenMarkers = new Set<string>()
+
+  addBoundaryCommandMarkers(markers, seenMarkers, normalisedCommand)
+
+  for (let offset = 1; offset <= 3 && offset < normalisedCommand.length; offset++) {
+    if (/[\sA-Za-z0-9]/.test(normalisedCommand[offset - 1])) {
+      break
+    }
+
+    addBoundaryCommandMarkers(markers, seenMarkers, normalisedCommand.slice(offset))
+  }
+
+  const quotedTestMarkerMatch = normalisedCommand.match(/"==\s*TSC\s+TEST\s+BLOCK\s+[^:=;\r\n]+/i)
+
+  if (quotedTestMarkerMatch) {
+    addBoundaryCommandMarkers(markers, seenMarkers, quotedTestMarkerMatch[0])
+  }
+
+  const unquotedTestMarkerMatch = normalisedCommand.match(/==\s*TSC\s+TEST\s+BLOCK\s+[^:=;\r\n]+/i)
+
+  if (unquotedTestMarkerMatch) {
+    addBoundaryCommandMarkers(markers, seenMarkers, unquotedTestMarkerMatch[0])
+  }
+
+  return markers
+}
+
+const getBoundaryPrefixTrimStart = (normalisedWindow: BoundaryNormalisedText, markerIndex: number): number => {
+  if (markerIndex === 0) {
+    return 0
+  }
+
+  const boundaryPrefix = normalisedWindow.text.slice(0, markerIndex)
+  const powershellPromptIndex = boundaryPrefix.lastIndexOf('PS ')
+
+  if (powershellPromptIndex !== -1) {
+    return normalisedWindow.rawIndexes[powershellPromptIndex] ?? 0
+  }
+
+  return normalisedWindow.rawIndexes[markerIndex] ?? 0
+}
+
+const getRetainedOutputTrailingWindowStart = (output: string): number => {
+  const charWindowStart = Math.max(0, output.length - BOUNDARY_TRAILING_WINDOW_CHARS)
+  let lineWindowStart = 0
+  let lineBreaks = 0
+
+  for (let index = output.length - 1; index >= 0; index--) {
+    if (output[index] !== '\n' && output[index] !== '\r') {
+      continue
+    }
+
+    if (output[index] === '\n' && output[index - 1] === '\r') {
+      index--
+    }
+
+    lineBreaks++
+
+    if (lineBreaks >= BOUNDARY_TRAILING_WINDOW_LINES) {
+      lineWindowStart = index + 1
+      break
+    }
+  }
+
+  return Math.max(charWindowStart, lineWindowStart)
+}
+
+const getRetainedOutputBoundaryTrimStart = (trailingWindow: string, nextCommand: string): number | null => {
+  const normalisedWindow = normaliseTextForBoundaryMatch(trailingWindow)
+  const markers = getBoundaryCommandMarkers(nextCommand)
+  let earliestTrimStart: number | null = null
+
+  if (!normalisedWindow.text || !markers.length) {
+    return null
+  }
+
+  for (const marker of markers) {
+    let searchFrom = 0
+
+    while (searchFrom < normalisedWindow.text.length) {
+      const markerIndex = normalisedWindow.text.indexOf(marker.text, searchFrom)
+
+      if (markerIndex === -1) {
+        break
+      }
+
+      const trimStart = getBoundaryPrefixTrimStart(normalisedWindow, markerIndex)
+
+      if (earliestTrimStart === null || trimStart < earliestTrimStart) {
+        earliestTrimStart = trimStart
+      }
+
+      searchFrom = markerIndex + 1
+    }
+  }
+
+  return earliestTrimStart
+}
+
+const trimRetainedOutputAtNextCommandBoundary = (output: string, nextCommand: string | null): string => {
+  if (!output || !nextCommand) {
+    return output
+  }
+
+  const windowStart = getRetainedOutputTrailingWindowStart(output)
+  const trailingWindow = output.slice(windowStart)
+  const trimStart = getRetainedOutputBoundaryTrimStart(trailingWindow, nextCommand)
+
+  if (trimStart === null) {
+    return output
+  }
+
+  return output.slice(0, windowStart + trimStart)
 }
 
 class StickyCommandHeaderCapture extends SessionMiddleware {
@@ -698,6 +935,16 @@ export class StickyCommandHeaderDecorator extends TerminalDecorator {
       return block
     }
 
+    const getNextCommandForBlock = (block: CommandBlock): string | null => {
+      const blockIndex = commandBlocks.indexOf(block)
+
+      if (blockIndex === -1) {
+        return null
+      }
+
+      return commandBlocks[blockIndex + 1]?.command ?? null
+    }
+
     const updateHeader = (source = 'manual update', details: { onScrollValue?: number, resize?: { cols: number, rows: number } } = {}): void => {
       const resolution = resolveVisibleCommandBlock()
       const block = resolution.kind === 'uncertain' ? null : resolution.block
@@ -943,6 +1190,7 @@ export class StickyCommandHeaderDecorator extends TerminalDecorator {
             lastCommand = command
 
             if (currentBlock) {
+              currentBlock.output = trimTrailingEchoedInputFromOutput(currentBlock.output, submittedLine, command)
               currentBlock.active = false
             }
 
@@ -1043,7 +1291,9 @@ export class StickyCommandHeaderDecorator extends TerminalDecorator {
       const copiedText = [
         `$ ${block.command}`,
         block.truncated ? '[Output truncated to the most recent retained text]' : '',
-        formatOutputForCopy(block.output).trimEnd(),
+        formatOutputForCopy(
+          trimRetainedOutputAtNextCommandBoundary(block.output, getNextCommandForBlock(block)),
+        ).trimEnd(),
       ].filter(Boolean).join('\n')
 
       try {
