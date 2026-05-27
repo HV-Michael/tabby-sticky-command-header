@@ -74,6 +74,7 @@ const SIMPLE_HEREDOC_OPERATOR = /(?:^|[\s;&|])<<(-?)\s*(?:"([^"\r\n]+)"|'([^'\r\
 const MIN_CLEAR_COMMAND_PREFIX_CHARS = 24
 const BOUNDARY_TRAILING_WINDOW_LINES = 24
 const BOUNDARY_TRAILING_WINDOW_CHARS = 4096
+const BOUNDARY_PROMPT_PREFIX_MAX_CHARS = 160
 
 const getSimpleHeredocState = (command: string): HeredocState | null => {
   const match = command.match(SIMPLE_HEREDOC_OPERATOR)
@@ -277,6 +278,17 @@ const normaliseTextForBoundaryMatch = (text: string): BoundaryNormalisedText => 
   for (let index = 0; index < text.length; index++) {
     const char = text[index]
 
+    if (char === '\r' || char === '\n') {
+      chars.push('\n')
+      rawIndexes.push(index)
+
+      if (char === '\r' && text[index + 1] === '\n') {
+        index++
+      }
+
+      continue
+    }
+
     if (char === '\u0008' || char === '\u007f') {
       chars.pop()
       rawIndexes.pop()
@@ -362,19 +374,59 @@ const getBoundaryCommandMarkers = (command: string): BoundaryCommandMarker[] => 
   return markers
 }
 
-const getBoundaryPrefixTrimStart = (normalisedWindow: BoundaryNormalisedText, markerIndex: number): number => {
+const getBoundaryLineStartIndex = (text: string, markerIndex: number): number => {
+  return text.lastIndexOf('\n', Math.max(0, markerIndex - 1)) + 1
+}
+
+const isBoundaryPromptLead = (prefix: string): boolean => {
+  return !/[A-Za-z0-9]/.test(prefix)
+}
+
+const isPowershellPromptBoundaryPrefix = (prefix: string): boolean => {
+  const trimmedPrefix = prefix.trimEnd()
+
+  if (trimmedPrefix.length > BOUNDARY_PROMPT_PREFIX_MAX_CHARS) {
+    return false
+  }
+
+  return /^PS\s.+[$#>%\]]$/.test(trimmedPrefix)
+}
+
+const isPromptArtifactBoundaryPrefix = (prefix: string): boolean => {
+  const trimmedPrefix = prefix.trimEnd()
+
+  if (!trimmedPrefix || trimmedPrefix.length > BOUNDARY_PROMPT_PREFIX_MAX_CHARS) {
+    return false
+  }
+
+  return /^[\s"'`>#$%\]]+$/.test(prefix) && /(?:>{1,2}|[$#>%\]])$/.test(trimmedPrefix)
+}
+
+const getBoundaryCandidateTrimStart = (
+  normalisedWindow: BoundaryNormalisedText,
+  markerIndex: number,
+): number | null => {
   if (markerIndex === 0) {
-    return 0
+    return null
   }
 
-  const boundaryPrefix = normalisedWindow.text.slice(0, markerIndex)
-  const powershellPromptIndex = boundaryPrefix.lastIndexOf('PS ')
+  const lineStartIndex = getBoundaryLineStartIndex(normalisedWindow.text, markerIndex)
+  const linePrefix = normalisedWindow.text.slice(lineStartIndex, markerIndex)
+  const powershellPromptIndex = linePrefix.lastIndexOf('PS ')
 
-  if (powershellPromptIndex !== -1) {
-    return normalisedWindow.rawIndexes[powershellPromptIndex] ?? 0
+  if (powershellPromptIndex !== -1 && isBoundaryPromptLead(linePrefix.slice(0, powershellPromptIndex))) {
+    const promptPrefix = linePrefix.slice(powershellPromptIndex)
+
+    if (isPowershellPromptBoundaryPrefix(promptPrefix)) {
+      return normalisedWindow.rawIndexes[lineStartIndex + powershellPromptIndex] ?? 0
+    }
   }
 
-  return normalisedWindow.rawIndexes[markerIndex] ?? 0
+  if (isPromptArtifactBoundaryPrefix(linePrefix)) {
+    return normalisedWindow.rawIndexes[lineStartIndex] ?? normalisedWindow.rawIndexes[markerIndex] ?? 0
+  }
+
+  return null
 }
 
 const getRetainedOutputTrailingWindowStart = (output: string): number => {
@@ -421,9 +473,9 @@ const getRetainedOutputBoundaryTrimStart = (trailingWindow: string, nextCommand:
         break
       }
 
-      const trimStart = getBoundaryPrefixTrimStart(normalisedWindow, markerIndex)
+      const trimStart = getBoundaryCandidateTrimStart(normalisedWindow, markerIndex)
 
-      if (earliestTrimStart === null || trimStart < earliestTrimStart) {
+      if (trimStart !== null && (earliestTrimStart === null || trimStart < earliestTrimStart)) {
         earliestTrimStart = trimStart
       }
 
